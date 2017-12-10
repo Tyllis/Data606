@@ -1,0 +1,721 @@
+---
+title: "DATA606 Predicting Data Scientist Salary using Linear Regression"
+author: "Jun Yan"
+date: "November 30, 2017"
+output: 
+  html_document:
+    toc: yes
+    toc_float: yes
+    toc_depth: 5
+---
+
+## Introduction
+
+In 2016, O'Reilly Media conducted a survey to find out what are the recent trends and salaries for data science professionals. The full report can be found here:
+
+http://www.oreilly.com/data/free/files/2016-data-science-salary-survey.pdf
+
+Particularly, the report created a regression model to predict a data scientist's salary. Appendix B of the report listed the explanatory variables and weights for the variables. This model provides insights to the data scientist field, such as how do factors like age, country, education, past job title, tools used, etc. affect the data scientist's wage. 
+
+In this project, I am  interested to do something similar - creating a linear regression model to estimate a data scientist's salary. O'Reilly Media did not release their survey data. Fortunately, Kaggle has just recently published a data scientist survey done in 2017:
+
+https://www.kaggle.com/kaggle/kaggle-survey-2017
+
+The survey asked multitude of questions such as gender, age, education level, nationality, past job title, etc. One of the questions was "What is your current total yearly compensation (salary + bonus)?" The respondents' answers to this question can be used as the response variable, while the answers to other questions can be treated as potential explanatory variables to be selected for the model. 
+
+In this project, the selection of explanatory variables is based on the adjusted R square, ${ R }_{ adj }^{ 2 }$. Both forward selection and backward elimination methods are deployed to select the variables. The method producing the highest ${ R }_{ adj }^{ 2 }$ is used for the final model. A number of regression diagnostics are also performed at the end, to check and note if the any assumptions are violated.
+
+Following R packages are used in this project:
+
+```{r warning=F, message=F}
+library(stringr)
+library(dplyr)
+library(knitr)
+library(kableExtra)
+library(car)
+```
+
+
+## Initial Data Exploration
+
+The Kaggle survey data packages include 5 files. Kaggle provided the following descriptions for these files.
+
+- `schema.csv`: a CSV file with survey schema. This schema includes the questions that correspond to each column name in both the `multipleChoiceResponses.csv` and `freeformResponses.csv`.
+- `multipleChoiceResponses.csv`: Respondents' answers to multiple choice and ranking questions. These are non-randomized and thus a single row does correspond to all of a single user's answers. 
+- `freeformResponses.csv`: Respondents' free form answers to Kaggle's survey questions. These responses are randomized within a column, so that reading across a single row does not give a single user's answers.
+- `conversionRates.csv`: Currency conversion rates (to USD) as accessed from the R package "quantmod" on September 14, 2017
+- `RespondentTypeREADME.txt`: This is a schema for decoding the responses in the "Asked" column of the schema.csv file.
+
+In this project, we use the `multipleChoiceResponses.csv` for the regression model.
+
+Importantly, note that not every question was shown to all respondents. Below is a note from Kaggle:
+
+"In an attempt to ask relevant questions to each respondent, we generally asked work related questions to employed data scientists and learning related questions to students. There is a column in the `schema.csv` file called 'Asked' that describes who saw each question."
+
+Thus there are questions not shown to all respondents, based on the respondent's employment status, and the `schema.csv` file can be used to identify these survey questions. One of the steps of this project will be to exclude these questions, since including the respondents' answers to these questions as variables may introduce bias to the model. We will only focus on questions shown to all respondents. Lastly, the `conversionRates.csv` is helpful to convert the compensation values to US dollars, since the respondents answered this question based on their countries' currencies.
+
+Let us import the relevant data.
+
+```{r}
+ds <- read.csv("kaggle-survey-2017/multipleChoiceResponses.csv", stringsAsFactors = F)
+cr <- read.csv("kaggle-survey-2017/conversionRates.csv", stringsAsFactors = F)
+sch <- read.csv("kaggle-survey-2017/schema.csv", stringsAsFactors = F)
+```
+
+Below, we check the dimension of each data imported.
+
+```{r}
+dim_ds <- dim(ds)
+dim_cr <- dim(cr)
+dim_sch <- dim(sch)
+dimension <- data.frame(dim_ds, dim_cr, dim_sch, row.names = c("Rows", "Columns"))
+kable(dimension, "html") %>% 
+  kable_styling(bootstrap_options = "striped", full_width = F)
+```
+
+The multiple choices data, imported as `ds` data frame table, has `r dim_ds[1]` rows, where each row is a case (respondent). The `r dim_ds[2]` columns are the respondents' answers to the questions.
+
+The conversion rate data, imported as `cr` table, has `r dim_cr[1]` rows for the currencies of countries appeared in the survey. The 3rd column contains the conversion rate to USD.
+
+The schema data, imported as `sch` table, has `r dim_sch[2]` columns. The first column contains the names of the questions in the multiple choices and the free form survey. The second column contains the full questions asked. And the third column identifies whether the question was shown to all respondents or just a subset of respondents.
+
+
+## Data Cleaning and Preparation
+
+### Removing Blank Cells
+
+There are NA and blank cells ("") within the `ds` data:
+
+```{r}
+# Check NA cells
+paste("Found", table(is.na(ds))[2], "NA cells in the data.")
+# Check blank cells
+paste("Found", table(ds=="")[2], "blank cells in the data.")
+```
+
+The line below turns all blank cells into NA. 
+
+```{r}
+# Transform blank cells into NA cells
+is.na(ds) <- ds == ""
+```
+
+### Converting Salary Data
+
+The `CompensationCurrency` column in the `ds` table identifies what currency the salary value is based on. The `CompensationAmount` column contains the salary value entered by the respondents. These values are still in string form. Below step converts them into numeric values.
+
+```{r warning=F}
+ds$CompensationAmount <- ds$CompensationAmount %>% 
+  str_replace_all(",","") %>% 
+  as.numeric()
+```
+
+Next, we are going to join the `ds` table and the `cr` table together, using the `CompensationCurrency` as key. At the same time, the `CompensationAmount` can be converted to US dollars using the `exchangeRate` column of the `cr` table, and stored as a new column named `Salary`. This will be our response variable, in which the linear regression model is trained to predict.
+
+```{r}
+cr <- rename(cr, CompensationCurrency = originCountry)
+ds <- ds %>% 
+  left_join(cr, by = "CompensationCurrency") %>% 
+  mutate(Salary = CompensationAmount*exchangeRate) %>% 
+  mutate(Salary = round(Salary))
+```
+
+In the following step, we remove any data where the `Salary` column is NA. These are the cases where the respondents did not respond to the `CompensationAmount` or `CompensationCurrency` questions, or the `CompensationCurrency` entered was not in the `exchangeRate` column. 
+
+```{r}
+ds <- filter(ds, !is.na(ds$Salary))
+```
+
+Next we are going to remove few columns in the `ds` table. Since we have completed the currency conversion to create the `Salary` column, we can remove the `CompensationAmount` and `CompensationCurrency` columns. During the model selection process, the model may pick up these two variables since they are highly correlated to the `Salary` variable. Likewise, the `exchangeRate` column is removed.
+
+```{r}
+remove_col <- which(names(ds) %in% c(names(cr), "CompensationAmount"))
+ds <- ds[,-remove_col]
+```
+
+Let's see how many cases we have left.
+
+```{r}
+dim(ds)
+```
+
+Thus we have `r dim(ds)[1]` rows left after the cleaning. 
+
+### Potential Explanatory Variables
+
+The main objective of this step is to create a reference table named `exp_vars`, which contains all of the potential explanatory variables. The `exp_vars` is to have 4 columns:
+
+- `Column` contains the names of the survey questions. Example: "Country". 
+- `Question` contains the the survey questions. Example: "Select the country you currently live in."
+- `Num.levels` contains the numbers of levels for each question. Example: "52" (there are 52 unique countries in the data set)
+- `Levels` contains the levels for each question. Example: "Argentina, Australia, Belarus, Belgium, Brazil, Canada...".
+
+This table will be very helpful in the backward elimination and forward selection step.
+
+First we would like to identify the survey questions not shown to all respondents. These will be excluded from the `exp_vars` table. The `Column` column of the `sch` table (schema) contains all the questions in the survey, and the `Asked` column identify whether the question is shown to all respondents, or only shown to a subset of the respondents.
+
+```{r}
+all_shown <- c()
+i <- 0
+for (question in names(ds)){
+  if (question %in% sch$Column){
+    row <- which(sch$Column == question)
+    if (sch[row, "Asked"] == "All"){
+      i <- i + 1
+      all_shown[i] <- question
+    }
+
+  }
+}
+length(all_shown)
+```
+
+Here, a vector named `all_shown` is created to extract the multiple choice survey questions that are shown to all respondents. The code found `r length(all_shown)` such questions. 
+
+Two helper functions are created.
+
+```{r}
+# This function takes the name of the survey question and the scheme data, and return the row of the question
+# question = a string vector containing the question names from the sch$Column
+findRow <- function(question){
+  row <- which(sch$Column == question)
+  return(sch[row,])
+}
+
+# This function takes the name of the survey question and the survey data, and returns the levels of answer to the question.
+# question = a string vector containing the question names
+findLvl <- function(question){
+  vec <- which(names(ds)==question)
+  vec <- ds[,vec]
+  temp <- levels(as.factor(vec))
+  return(temp)
+}
+```
+
+We can now construct the `exp_vars` table.
+
+```{r}
+# Use findRow function to extract information from the schema table for only those questions shown to all surveyee.
+exp_vars <- all_shown %>% 
+  sapply(findRow) %>% 
+  t() %>% 
+  data.frame(row.names=NULL)
+# Apply findLvl function to extract from the survey data the levels of answer to each question.
+all_levels <- sapply(all_shown, findLvl)
+# Create a new column, counting the number of levels for each question.
+exp_vars$Num.Levels <- sapply(all_levels, length)
+# Create a new column, collecting all levels for the question.
+exp_vars$Levels <- sapply(all_levels, paste, collapse="~")
+# Remove the "Asked" redundant column.
+exp_vars <- exp_vars[,-which(names(exp_vars)=="Asked")]
+head(sort(exp_vars$Num.Levels, decreasing = T))
+kable(exp_vars[1:5,1:3])
+```
+
+### Create New Explanatory variables 
+
+There is still yet a problem. Some of the questions were answered using check boxes, in which the respondent can check off multiple boxes. For these check-box type questions, the survey data table concatenated the boxes that the respondent checked off for that question.
+
+For example, the question "MLTechniquesSelect" has a check box type answer, containing `r exp_vars[which(exp_vars$Column=="MLTechniquesSelect"),"Num.Levels"]` levels of answer.
+
+```{r}
+exp_vars[which(exp_vars$Column=="MLTechniquesSelect"),"Num.Levels"]
+```
+
+In reality, these levels are just unique combination of the boxes check off by the respondents. We will need to find the "base levels" for these type of questions.
+
+Following helper function can perform this task:
+
+```{r}
+# This function takes a question that has check-box type answers and return the avaiable box selections 
+# question = a string vector containing the question names from the exp_vars$Column
+findSelections <- function(question){
+  temp <- which(exp_vars$Column == question) %>% 
+    exp_vars[.,"Levels"] %>% 
+    str_split("~") %>% 
+    unlist() %>% 
+    str_split(",") %>% 
+    unlist() %>% 
+    unique()
+  return(temp)
+}
+```
+
+Testing this on the "MLTechniquesSelect" question returns the base levels (boxes) for this question.
+
+```{r}
+findSelections("MLTechniquesSelect")
+```
+
+Further, these check-box type questions have to be broken down into separate, binary variables containing two levels: True or False. If the respondent checked the boxes, the value will be True. For example, we will create a new variable "MLTechniquesSelect_BayesianTechnique". If the respondent did not check off the box, the value for this new variable will be False. Otherwise, it is True.
+
+```{r}
+# This function takes a question that has check-box type answer and use 
+# the available box selections to create features (columns), in which each
+# column contains boolean value indicating if the surveyee checked the box.
+# The function returns a data.frame object.
+# question = a string vector containing the question names
+createFeatures <- function(question){
+  base_lvls <- findSelections(question)
+  col <- which(names(ds)==question)
+  vec <- ds[,col]
+  temp <- lapply(vec, str_detect, base_lvls)
+  temp <- data.frame(matrix(unlist(temp), nrow=length(temp), byrow=T))
+  names(temp) <- base_lvls %>% 
+    str_replace_all("[[:punct:]]| ", "") %>% 
+    paste(question, ., sep="_")
+  return(temp)
+}
+```
+
+The above helper function will create a data.frame object, where the columns are the newly created variables, and each row indicate if each survey checked off the boxes or not.
+
+Testing this on the "MLTechniquesSelect" question:
+
+```{r}
+temp <- createFeatures("MLTechniquesSelect")
+dim(temp)
+kable(temp[1:5, 1:2])
+```
+
+We will now identify the check-box type survey questions, create the new columns, and use `cbind` to include them in the `ds` table.
+
+```{r}
+checkbox_questions <- c("LearningPlatformSelect", "MLTechniquesSelect", 
+                        "PastJobTitlesSelect", "BlogsPodcastsNewslettersSelect",
+                        "MLSkillsSelect", "PublicDatasetsSelect")
+new_columns <- lapply(checkbox_questions, createFeatures)
+ds <- cbind(ds, new_columns)
+```
+
+We also want to update the `exp_vars` table to include these new variables.
+
+```{r}
+# Create pattern to be used as parameter for the str_extract function
+pattern <- checkbox_questions %>% 
+  paste("_[[:print:]]*", sep="") %>% 
+  paste(collapse="|")
+# Use str_extract to detect and extract the names of new columns in ds
+new_features <- unlist(str_extract_all(names(ds), pattern))
+# This function finds the full question given the name of the survey question of the new features
+# question = a string vector containing the question names
+findQsn <- function(question){
+  strings <- str_extract(question, "\\w*_")
+  strings <- str_replace(strings, "_", "")
+  temp <- findRow(strings)
+  return(temp$Question)
+}
+# Construct the data frame
+new_features <- data.frame(Column = new_features, 
+                           Question = sapply(new_features, findQsn), 
+                           Num.Levels = rep(2, length(new_features)), 
+                           Levels = rep("TRUE|FALSE", length(new_features)))
+# Combine with the exp_vars
+exp_vars <- rbind(exp_vars, new_features)
+```
+
+There are two variables that we will need to remove from the `exp_vars` table - LearningCategory, and LearningPlatformUsefulness. The answers to these questions are respondents' opinions and will not be helpful for the model.
+
+```{r}
+# Identify the questions related to "LearningCategory" and "LearningPlatformUsefulness"
+lcpu_questions <- exp_vars$Column %>% 
+  sapply(str_extract, "LearningCategory\\w*|LearningPlatformUsefulness\\w*") %>% 
+  .[!is.na(.)]
+remove_features <- c(checkbox_questions, lcpu_questions,
+                     "MLToolNextYearSelect", "MLMethodNextYearSelect")
+exp_vars <- exp_vars[!(exp_vars$Column %in% remove_features),]
+row.names(exp_vars) <- c(1:length(exp_vars$Column))
+```
+
+We are ready to move to the next step. But before that, take a look at a portion of the `exp_var` table.
+
+```{r}
+kable(exp_vars[1:10,1:3])
+dim(exp_vars)[1]
+```
+
+Therefore, we have `r dim(exp_vars)[1]` potential explanatory variables, which we will be selecting from in our regression model. Below is a list of these variables:
+
+```{r}
+names(exp_vars) <- c(1:length(exp_vars$Column))
+unlist(exp_vars$Column)
+```
+
+
+## Linear Regression
+
+### Response Variable Transformation
+
+Let's inspect the distribution of `Salary` column, our response variable. 
+
+```{r}
+summary(ds$Salary)
+```
+
+The distribution range is very wide, and there are some outliers that apparently do not make sense. For example, the maximum salary here is 28 billions USD, and the minimum salary is shown to be -74 dollars, a loss. We will need to remove these obviously erroneous cases.
+
+If the IQR*1.5 criteria is used to remove the outliers, we may be removing too much data. Here, we opt to take out 1% of data from the top and bottom of the data respectively.
+
+```{r}
+one_percent <- round(0.01 * dim(ds)[1])
+bottom <- max(sort(ds$Salary)[1:one_percent])
+top <- min(sort(ds$Salary, decreasing = T)[1:one_percent])
+ds <- filter(ds, Salary > bottom & Salary < top)
+summary(ds$Salary)
+```
+
+The maximum value of `r max(ds$Salary)` USD is now more reasonable. We still have an issue. The `Salary` is heavily skewed to the right.
+
+```{r}
+hist(ds$Salary, main = "Histogram of Salary", ylab = "Salary (USD)")
+```
+
+The regression model trained using response variable skewed like this may violate the constant variance of error assumption. Idealy, the response variable has to be transformed to become more normal. 
+
+Here, we opt to use the Box Cox Transformation. This transformation uses the following formula:
+
+$y=\frac { { x }^{ \lambda  }-1 }{ \lambda  }$
+
+Here, x is the variables we wish to transform, and y is the resulting transformed variables. $\lambda$ is a controlling parameter and is usually 0.4.
+
+Blow, two functions are created to transform a variable using Box Cox Transformation, and to convert a transformed variable back to its original form.
+
+```{r}
+# Perform BoxCoxTransformation
+bct <- function(vec, lambda = 0.4) return((vec^lambda-1)/lambda)
+
+# Perform inverse of BoxCoxTransformation
+invbct <- function(vec, lambda = 0.4) return((vec*lambda+1)^(1/lambda))
+```
+
+The `Salary` variable can now be transformed.
+
+```{r}
+ds$Salary <- bct(ds$Salary)
+summary(ds$Salary)
+hist(ds$Salary, main = "Histogram of Salary", xlab = "Transformed Salary")
+boxplot(ds$Salary, main = "Box Plot of Salary", ylab ="Transformed Salary")
+```
+
+As you can see, it is a lot more normally distributed.
+
+### Helper Functions
+
+Three helper functions are created to wrap the common tasks together. we will be calling these functions in the variable selection step.
+
+```{r}
+# This functions returns the adjusted R square for the linear model
+# question = a string vector or list containing the question names
+calAdjRsqr <- function(question){
+  formula <- question %>% 
+    paste(collapse="+") %>% 
+    paste("Salary", "~", .) %>% 
+    as.formula()
+  ds$Salary[is.infinite(ds$Salary)] <- NA
+  fit <- lm(formula, data = ds)
+  return(summary(fit)$adj.r.squared)
+}
+```
+
+The above function, `calAdjRsqr`, calculates the adjusted R square given the names of the survey questions (variables). For example, the adjusted R square for the model using "Age" and "GenderSelect" as explanatory variables will yield following adjusted R square:
+
+```{r}
+calAdjRsqr(c("Age", "GenderSelect"))
+```
+
+Note that we wrap the `lm` function inside the `calAdjRsqr` to perform the linear regression. Then we extract the adjust R square from the model using `summary` function. 
+
+Next, we created two recursive functions to calculate the adjusted R squares for two cases - when we eliminate a variable from the current model, or when we add a variable to the model.
+
+```{r}
+# This functions calculates the adj R squares of the models resulted from taking out each variable
+# explain = a string vector or list containing the question names referencing the explainatory variables in the model
+# pos = starting position of the search in the explain vector
+backwardSearch <- function(explain, pos = 1){
+  if (pos > length(explain)) return(c()) 
+  temp <- c(calAdjRsqr(explain[-pos]), backwardSearch(explain, pos+1))
+  return(temp)
+}
+# This functions calculates the adj R squares of the models resulted from adding a variable
+# explain = a string vector or list containing the question names referencing the explainatory variables in the model
+# add_explain = a string vector or list containing the explainatory variables to be added to the model
+# pos = starting position of the search in the add_explain vector
+forwardSearch <- function(explain, add_explain, pos=1){
+  if (pos > length(add_explain)) return(c())
+  temp <- c(calAdjRsqr(c(explain, add_explain[pos])), forwardSearch(explain, add_explain, pos+1))
+  return(temp)
+}
+```
+
+Given a vector list of variables (in the form of survey question names), the `backwardSearch` function will call upon `calAdjRsqr` as well as itself to calculate the adjusted R square if each of the variable is taken out of the model. As a concrete example, below is a test when the function is run to see what happen to the adjust R square when each of the variable in the model using explanatory variables "Age", "GenderSelect", and "Country", is taken out of the model. 
+
+```{r}
+# When "Age" is left out of the model
+calAdjRsqr(c("GenderSelect", "Country"))
+# When "GenderSelect" is left out of the model
+calAdjRsqr(c("Age", "Country"))
+# When "Country" is left out of the model
+calAdjRsqr(c("Age", "GenderSelect"))
+# Testing the function
+backwardSearch(c("Age", "GenderSelect", "Country"))
+```
+
+Similarly, the `forwardSearch` function calculates the adjusted R squares when adding each variable to the model. 
+
+```{r}
+existing <- c("Age")
+to_add <- c("GenderSelect", "Country")
+# When "GenderSelect" is added to the model
+calAdjRsqr(c(existing, to_add[1]))
+# When "Country" is added to the model
+calAdjRsqr(c(existing, to_add[2]))
+# Testing the function
+forwardSearch(existing, to_add)
+```
+
+### Backward Elimination
+
+We can now perform the backward elimination to select the variables in the `exp_vars` table. We begin with a model including all of the `r dim(exp_vars)[1]` variables. Then, a while-loop is employed. In each loop, the `backwardSearch` function is used to calculate the adjusted R square for the models created by eliminating each of the variables in the current model. The maximum adjusted R square is found using `max`, and the variable to be dropped is identified. If the new adjusted R square by eliminating this variable is greater than the current model, the variable is allowed to be dropped from the model, and the process repeats. The while-loop stops when the adjusted R square cannot improve anymore through dropping any additional variables.   
+
+```{r}
+var_pool <- unlist(exp_vars$Column)
+names(var_pool) <- c(1:length(var_pool))
+var_remain <- var_pool
+max_arsquare <- calAdjRsqr(var_remain)
+var_removed <- c()
+new_arsquare_be <- c()
+current_max <- 0
+while(max_arsquare > current_max){
+  current_max <- max_arsquare
+  vec_arsquare <- backwardSearch(var_remain)
+  max_arsquare <- max(vec_arsquare)
+  if(max_arsquare > current_max){
+    pos <- which(vec_arsquare == max_arsquare)[1]
+    var_removed <- c(var_removed, var_remain[pos])
+    new_arsquare_be <- c(new_arsquare_be, max_arsquare)
+    var_remain <- var_remain[-pos]
+  }
+}
+```
+
+Below is a list of variables removed at each step of the loop.
+
+```{r}
+backward.elimination <- data.frame(Remove.Order = c(1:length(var_removed)),
+                                   Variable.Removed = var_removed, 
+                                   Adj.R.Square = new_arsquare_be)
+kable(backward.elimination)
+```
+
+At the end, we arrive at a model with `r length(var_remain)` variables. The final adjusted R square we arrive at is `r max(new_arsquare_be)`.
+
+We can now create the linear regression model using the variables remained:
+
+```{r}
+fit_be <- var_remain%>% 
+  paste(collapse="+") %>% 
+  paste("Salary", ., sep="~") %>% 
+  lm(data=ds, subset=(!is.infinite(Salary)))
+```
+
+### Forward Selection
+
+Similarly, we performed a forward selection using the `forwardSearch` function in a while-loop. We start by including no variable in the model. In each loop, we calculate the adjusted R square of the models created by adding each of the remaining variables to the current model. The variable that yields the greatest increase in adjusted R square is selected, and the process repeats. Again, the loop stops when the adjusted R square cannot be improved anymore through adding additional variables.
+
+```{r}
+var_add <- c()
+vec_arsquare <- forwardSearch(var_add, var_pool)
+max_arsquare <- max(vec_arsquare)
+new_arsquare_fs <- c()
+current_max <- 0
+while(max_arsquare > current_max){
+  current_max <- max_arsquare
+  pos <- which(vec_arsquare == max_arsquare)[1]
+  var_add <- c(var_add, var_pool[pos])
+  var_pool <- var_pool[!var_pool %in% var_add]
+  new_arsquare_fs <- c(new_arsquare_fs, max_arsquare)
+  vec_arsquare <- forwardSearch(var_add, var_pool)
+  max_arsquare <- max(vec_arsquare)
+}
+```
+
+Below is a list of variables added at each step of the loop.
+
+```{r}
+forward.selection <- data.frame(Add.Order = c(1:length(var_add)), 
+                                Variable.added = var_add, 
+                                Adj.R.Square = new_arsquare_fs)
+kable(forward.selection)
+```
+
+At the end, we arrive at a model with `r length(var_add)` variables. The final adjusted R square we arrive at is `r max(new_arsquare_fs)`.
+
+We can now create the linear regression model using the variables added:
+
+```{r}
+fit_fs <- var_add%>% 
+  paste(collapse="+") %>% 
+  paste("Salary", ., sep="~") %>% 
+  lm(data=ds, subset=(!is.infinite(Salary)))
+```
+
+### Model Selection
+
+Although the adjusted R square of the model created from backward elimination (`r max(new_arsquare_be)`) is higher than that created by forward selection (`r max(new_arsquare_fs)`), the difference is very small. The number of variables included in the backward elimination (`r length(var_remain)`) is more than that of forward selection (`r length(var_add)`), which makes the backward elimination model more complex. In addition, the F-statistic favors the model created by the forward selection.
+
+```{r}
+# F-statistic of the model using backward elimination
+summary(fit_be)$fstatistic
+# F-statistic of the model using forward selection
+summary(fit_fs)$fstatistic
+```
+
+Therefore, we choose the variables selected through the forward selection method.
+Recall that the `ds` table used to perform the regression has `r dim(ds)[1]` rows (cases). The regression dropped additional `r length(fit_fs$na.action)` cases due to the NA cells in the answers to the explanatory variables. Therefore, the number of cases used to perform the fitting is:
+
+```{r}
+length(fit_fs$fitted.values)
+```
+
+
+## Model Diagnostic
+
+We will check the following model assumptions:
+
+1. the residuals of the model are nearly normal,
+2. the variability of the residuals is nearly constant,
+3. the residuals are independent, and
+4. each variable is linearly related to the outcome.
+
+### Normality of the Residuals
+
+First, check if the residuals are reasonably spread.
+
+```{r}
+summary(fit_fs$residuals)
+```
+
+The distribution centers around 0, and the 1st and 2nd quantiles are reasonably close. The maximum and minimum values are not too far different. 
+
+Below, histogram and the Q-Q plot are plotted to check normality.
+
+```{r}
+hist(x=residuals(fit_fs), xlab = "Residuals", breaks = 50, main = "Histogram of Residuals")
+plot(fit_fs, which = 2)
+```
+
+The histogram shows that the distribution of the residuals has the typical bell-shape of a normal distribution. The Q-Q plot shows that points beyond 2nd quantiles tend to drop further from normality. But by and large the points fall along the normal line. 
+
+### Constant Variability of Residuals
+
+The Scale-Location plot provided by the R base `plot` function can be used to check if the variability of the residuals is nearly constant.
+
+```{r}
+plot(fit_fs, which = 3)
+```
+
+The red line through the center is nearly horizontal and flat, indicating that the variability is nearly constant. To be sure, the `ncvTest` function from the `car` package can be used to perform a hypothesis test. The null hypothesis is that the variance of the residuals is constant.
+
+```{r}
+ncvTest(fit_fs)
+```
+
+The p-value is large, indicating that the null hypothesis cannot be rejected. There is no violation of the constant variability assumption.
+
+### Residual Independence 
+
+The survey was done online. It is believed that there is no order on when each data point is collected. Therefore, the residuals are believed to be independent against the order of data collection.
+
+Instead, we will check if there are relation between the residuals and some of the explanatory variables.
+
+First, we sub-select from the `ds` table the cases that was actually used in the regression model. Recall that some of the cases were dropped due to explanatory variables having NA values in their answers, and the number of cases used is `r length(fit_fs$fitted.values)`.
+
+```{r}
+cases_used <- ds[names(fit_fs$fitted.values),] 
+dim(cases_used)
+```
+
+Place the residuals into the `cases_used` table.
+
+```{r}
+cases_used$residuals <- fit_fs$residuals
+```
+
+Below we attempt to plot the Residuals vs Variable for each explanatory variable in the model.
+
+```{r}
+par(mfrow=c(2,3))
+for (var in var_add){
+  colnum <- which(names(cases_used)==var)
+  vec <- cases_used[,colnum]
+  if (!is.numeric(vec)) {
+    vec <- as.factor(vec)
+  }
+  plot(x = vec, y = cases_used$residuals, las=1, xaxt='n', main = var)
+}
+```
+
+We observe that for some of the variables, the residuals fluctuate across groups. The fluctuation may be explained by the disparity of respondents in the survey itself. For example, in the "GenderSelect" plot, it seems the "Male" group has a lot more variability than other groups. Examine the "GenderSelect" variable:
+
+```{r}
+temp <- cases_used %>% 
+  group_by(GenderSelect) %>% 
+  summarise(Group.Size = n())
+kable(temp, "html") %>% 
+  kable_styling(bootstrap_options = "striped", full_width = F)
+```
+
+We see that the male group size is overwhelmingly larger than other groups in the "GenderSelect" variable. This maybe the reason causing the difference in variability. 
+
+### Linearity of Variables
+
+In this check, we will see if the explanatory variables are reasonably related to the response variable. A table is constructed to include variables and the absolute value of correlation coefficient each variable has with the response variable ("Salary"). 
+
+```{r}
+correlations <- c()
+for (var in var_add){
+  colnum <- which(names(cases_used)==var)
+  vec <- cases_used[,colnum]
+  if (!is.numeric(vec)) {
+    vec <- as.numeric(as.factor(vec))
+  }
+  correlations <- c(correlations, cor(vec, cases_used$Salary))
+}
+temp <- data.frame(Variables = var_add, Correlations = abs(correlations))
+kable(temp[order(temp$Correlations, decreasing=T), ], "html") %>% 
+  kable_styling(bootstrap_options = "striped", full_width = F)
+```
+
+The "Age", "Country", and "Tenure" variables are the top three in terms of correlation to "Salary". At the bottom of the table are some of the "PasteJobTitlesSelect". These contribute little to the model. 
+
+
+## Conclusion
+
+A linear regression model is created to predict a data scientist's salary, using data from Kaggle's 2017 Data Scientist Survey. The response variable is the salary, transformed using Box Cox Transformation. Both backward elimination and forward selection are used to select the explanatory variables. The variables selected by the forward selection method are chosen due to the resulting model's simplicity and higher F-statistics. The model has a adjusted R square of `r summary(fit_fs)$adj.r.square`. 
+
+Model diagnostics are analyzed to check if any regression assumptions are violated. Below is a list of findings:
+
+- The residuals are nearly normal, as shown in the histogram and Q-Q plot
+- The variability of the residuals are nearly constant, as demonstrated by the Scale-Location plot and the Non-Constant Variance test
+- Some of the variables exhibit fluctuation of residual distribution across their groups. This may be explained by the large disparity of respondents across the groups. 
+- The absolute value of correlation coefficient is calculated for each explanatory variable with the response variable. The correlation ranges from `r min(abs(correlations))` to `r max(abs(correlations))`. 
+
+In retrospect, below is a list of weakness of this model that may need improvement.
+
+- It may be better to eliminate some of the variables from the model. These are the variables having smaller correlation coefficient with the response variable, or having large p-value in the t-statistics calculated for the model.
+- The residuals independence assumption may require a deeper look. If the residuals is dependent on the groups of a explanatory variable, this variable will need to be dropped from the model.
+
+Lastly, below is a table listing all of the variables, weights, and statistics created by the linear regression.
+
+```{r}
+sumstats <- summary(fit_fs)
+summary.table <- data.frame(sumstats$coefficient)
+summary.table$variables <- row.names(summary.table)
+row.names(summary.table) <- c(1:nrow(summary.table))
+summary.table <- summary.table[,c(5,1,2,3,4)]
+kable(summary.table, "html") %>% 
+  kable_styling(bootstrap_options = "striped", full_width = F)
+```
+
+
+
