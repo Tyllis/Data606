@@ -1,5 +1,5 @@
 ---
-title: "DATA606 Predicting Data Scientist Salary using Linear Regression"
+title: "DATA606 Predicting Data Scientist Salary using Kaggle's 2017 Survey"
 author: "Jun Yan"
 date: "November 30, 2017"
 output: 
@@ -15,7 +15,7 @@ In 2016, O'Reilly Media conducted a survey to find out what are the recent trend
 
 http://www.oreilly.com/data/free/files/2016-data-science-salary-survey.pdf
 
-Particularly, the report created a regression model to predict a data scientist's salary. Appendix B of the report listed the explanatory variables and weights for the variables. This model provides insights to the data scientist field, such as how do factors like age, country, education, past job title, tools used, etc. affect the data scientist's wage. 
+In particular, the report created a regression model to predict a data scientist's salary. Appendix B of the report listed the explanatory variables and weights for the variables. This model provides insights to the data scientist field, such as how do factors like age, country, education, past job title, tools used, etc. affect the data scientist's wage. 
 
 In this project, I am  interested to do something similar - creating a linear regression model to estimate a data scientist's salary. O'Reilly Media did not release their survey data. Fortunately, Kaggle has just recently published a data scientist survey done in 2017:
 
@@ -195,7 +195,7 @@ findLvl <- function(question){
 We can now construct the `exp_vars` table.
 
 ```{r}
-# Use findRow function to extract information from the schema table for only those questions shown to all surveyee.
+# Use findRow function to extract information from the schema table for only those questions shown to all respondent.
 exp_vars <- all_shown %>% 
   sapply(findRow) %>% 
   t() %>% 
@@ -209,7 +209,9 @@ exp_vars$Levels <- sapply(all_levels, paste, collapse="~")
 # Remove the "Asked" redundant column.
 exp_vars <- exp_vars[,-which(names(exp_vars)=="Asked")]
 head(sort(exp_vars$Num.Levels, decreasing = T))
-kable(exp_vars[1:5,1:3])
+kable(exp_vars, "html") %>% 
+  kable_styling() %>%
+  scroll_box(height = "300px")  
 ```
 
 ### Create New Explanatory variables 
@@ -252,7 +254,7 @@ Further, these check-box type questions have to be broken down into separate, bi
 ```{r}
 # This function takes a question that has check-box type answer and use 
 # the available box selections to create features (columns), in which each
-# column contains boolean value indicating if the surveyee checked the box.
+# column contains boolean value indicating if the respondent checked the box.
 # The function returns a data.frame object.
 # question = a string vector containing the question names
 createFeatures <- function(question){
@@ -275,7 +277,9 @@ Testing this on the "MLTechniquesSelect" question:
 ```{r}
 temp <- createFeatures("MLTechniquesSelect")
 dim(temp)
-kable(temp[1:5, 1:2])
+kable(temp, "html") %>% 
+  kable_styling() %>%
+  scroll_box(height = "300px")
 ```
 
 We will now identify the check-box type survey questions, create the new columns, and use `cbind` to include them in the `ds` table.
@@ -327,20 +331,16 @@ exp_vars <- exp_vars[!(exp_vars$Column %in% remove_features),]
 row.names(exp_vars) <- c(1:length(exp_vars$Column))
 ```
 
-We are ready to move to the next step. But before that, take a look at a portion of the `exp_var` table.
+We are ready to move to the next step. But before that, take a look at the `exp_var` table.
 
 ```{r}
-kable(exp_vars[1:10,1:3])
 dim(exp_vars)[1]
+kable(exp_vars, "html") %>% 
+  kable_styling() %>%
+  scroll_box(height = "300px")
 ```
 
-Therefore, we have `r dim(exp_vars)[1]` potential explanatory variables, which we will be selecting from in our regression model. Below is a list of these variables:
-
-```{r}
-names(exp_vars) <- c(1:length(exp_vars$Column))
-unlist(exp_vars$Column)
-```
-
+Therefore, we have `r dim(exp_vars)[1]` potential explanatory variables.
 
 ## Linear Regression
 
@@ -370,7 +370,7 @@ The maximum value of `r max(ds$Salary)` USD is now more reasonable. We still hav
 hist(ds$Salary, main = "Histogram of Salary", ylab = "Salary (USD)")
 ```
 
-The regression model trained using response variable skewed like this may violate the constant variance of error assumption. Idealy, the response variable has to be transformed to become more normal. 
+The regression model trained using response variable skewed like this may violate the constant variance of error assumption. Ideally, the response variable has to be transformed to become more normal. 
 
 Here, we opt to use the Box Cox Transformation. This transformation uses the following formula:
 
@@ -504,7 +504,9 @@ Below is a list of variables removed at each step of the loop.
 backward.elimination <- data.frame(Remove.Order = c(1:length(var_removed)),
                                    Variable.Removed = var_removed, 
                                    Adj.R.Square = new_arsquare_be)
-kable(backward.elimination)
+kable(backward.elimination, "html", row.names = F) %>% 
+  kable_styling() %>%
+  scroll_box(height = "300px")
 ```
 
 At the end, we arrive at a model with `r length(var_remain)` variables. The final adjusted R square we arrive at is `r max(new_arsquare_be)`.
@@ -545,7 +547,9 @@ Below is a list of variables added at each step of the loop.
 forward.selection <- data.frame(Add.Order = c(1:length(var_add)), 
                                 Variable.added = var_add, 
                                 Adj.R.Square = new_arsquare_fs)
-kable(forward.selection)
+kable(forward.selection, "html", row.names = F) %>% 
+  kable_styling() %>%
+  scroll_box(height = "300px")
 ```
 
 At the end, we arrive at a model with `r length(var_add)` variables. The final adjusted R square we arrive at is `r max(new_arsquare_fs)`.
@@ -683,7 +687,8 @@ for (var in var_add){
 }
 temp <- data.frame(Variables = var_add, Correlations = abs(correlations))
 kable(temp[order(temp$Correlations, decreasing=T), ], "html") %>% 
-  kable_styling(bootstrap_options = "striped", full_width = F)
+  kable_styling(bootstrap_options = "striped", full_width = F) %>%
+  scroll_box(height = "300px")
 ```
 
 The "Age", "Country", and "Tenure" variables are the top three in terms of correlation to "Salary". At the bottom of the table are some of the "PasteJobTitlesSelect". These contribute little to the model. 
@@ -705,7 +710,7 @@ In retrospect, below is a list of weakness of this model that may need improveme
 - It may be better to eliminate some of the variables from the model. These are the variables having smaller correlation coefficient with the response variable, or having large p-value in the t-statistics calculated for the model.
 - The residuals independence assumption may require a deeper look. If the residuals is dependent on the groups of a explanatory variable, this variable will need to be dropped from the model.
 
-Lastly, below is a table listing all of the variables, weights, and statistics created by the linear regression.
+Lastly, below is a table listing all of the variables, weights, and statistics created by the linear regression. A [shiny app](https://tyllis.shinyapps.io/predict_salary/) built using these coefficients may be used to predict the salary for a data scientist.
 
 ```{r}
 sumstats <- summary(fit_fs)
@@ -714,7 +719,8 @@ summary.table$variables <- row.names(summary.table)
 row.names(summary.table) <- c(1:nrow(summary.table))
 summary.table <- summary.table[,c(5,1,2,3,4)]
 kable(summary.table, "html") %>% 
-  kable_styling(bootstrap_options = "striped", full_width = F)
+  kable_styling(bootstrap_options = "striped", full_width = F) %>% 
+  scroll_box(height = "300px")
 ```
 
 
